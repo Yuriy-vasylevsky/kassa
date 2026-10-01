@@ -17,6 +17,7 @@ class State:
     reset_at: float | None = None
     notice: str | None = None
     current_group: str | None = None
+    ink_entries: str | None = None
 
 
 class Store:
@@ -31,6 +32,8 @@ class Store:
             user_columns = {row["name"] for row in tx.db.execute("PRAGMA table_info(users)")}
             if "current_group" not in user_columns:
                 tx.db.execute("ALTER TABLE users ADD COLUMN current_group TEXT")
+            if "ink_entries" not in user_columns:
+                tx.db.execute("ALTER TABLE users ADD COLUMN ink_entries TEXT")
             tx.db.execute("""CREATE TABLE IF NOT EXISTS processed (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT, update_id INTEGER UNIQUE NOT NULL)""")
             tx.db.execute("""CREATE TABLE IF NOT EXISTS reports (
@@ -89,16 +92,17 @@ class Transaction:
 
     def save(self, state: State) -> None:
         self.db.execute("""INSERT INTO users
-            (user_id, main_message_id, edit_field, reset_at, notice, current_group)
-            VALUES (:user_id, :main_message_id, :edit_field, :reset_at, :notice, :current_group)
+            (user_id, main_message_id, edit_field, reset_at, notice, current_group, ink_entries)
+            VALUES (:user_id, :main_message_id, :edit_field, :reset_at, :notice, :current_group, :ink_entries)
             ON CONFLICT(user_id) DO UPDATE SET main_message_id=excluded.main_message_id,
             edit_field=excluded.edit_field, reset_at=excluded.reset_at,
-            notice=excluded.notice, current_group=excluded.current_group""", asdict(state))
+            notice=excluded.notice, current_group=excluded.current_group,
+            ink_entries=excluded.ink_entries""", asdict(state))
 
     def reset(self) -> None:
         on_card = calculate(self.cash())["on_card"]
         self.update_fields({name: on_card if name == "received" else 0 for name in FIELDS})
-        self.db.execute("""UPDATE users SET edit_field=NULL, reset_at=NULL, current_group=NULL,
+        self.db.execute("""UPDATE users SET edit_field=NULL, reset_at=NULL, current_group=NULL, ink_entries=NULL,
             notice='Нову касу розпочато: суму «На карті» перенесено в «Отримав». /start — оновити показники.'""")
 
     def seen(self, update_id: int) -> bool:

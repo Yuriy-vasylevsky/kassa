@@ -1,6 +1,7 @@
 """Cash workflow, independent of the Telegram transport."""
 
 import time
+import json
 from dataclasses import dataclass
 
 from .cash import FIELDS, MoneyError, parse_money, calculate
@@ -9,6 +10,21 @@ from .storage import Store
 from .views import report
 
 HELP = "Натисни поле → введи число. /start — оновити, /cancel — скасувати ввід, /report — звіт."
+
+
+def ink_entries(state) -> list[int]:
+    """Return the uncommitted collection amounts stored in a user session."""
+    try:
+        entries = json.loads(state.ink_entries or "[]")
+    except json.JSONDecodeError:
+        return []
+    return entries if isinstance(entries, list) and all(type(value) is int for value in entries) else []
+
+
+def clear_ink_draft(state) -> None:
+    state.ink_entries = None
+    if state.edit_field == "ink":
+        state.edit_field = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +65,7 @@ class CashService:
                     page = action[8:]
                     if page.isascii() and page.isdigit() and len(page) <= 4:
                         state.current_group = "history:" + str(min(int(page), max(0, (len(tx.reports()) - 1) // 7)))
-                        state.edit_field = None
+                        clear_ink_draft(state)
                 elif action.startswith("saved:") and state.reset_at is None:
                     saved = tx.report_text(action[6:])
                     if saved is None:
@@ -58,29 +74,43 @@ class CashService:
                         page = (state.current_group.split(":")[1]
                                 if state.current_group and state.current_group.startswith("history:") else "0")
                         state.current_group = f"saved:{action[6:]}:{page}"
-                        state.edit_field = None
+                        clear_ink_draft(state)
                 elif action.startswith("edit:"):
                     name = action[5:]
                     if name in FIELDS and state.reset_at is None:
                         state.edit_field = name
                         state.current_group = FIELDS[name].group
+                        state.ink_entries = "[]" if name == "ink" else None
                 elif action.startswith("group:"):
                     group = action[6:]
                     if group in {"start", "game", "expense", "balance"} and state.reset_at is None:
                         state.current_group = group
+                        clear_ink_draft(state)
                         state.edit_field = None
                 elif action == "back":
                     state.current_group = None
+                    clear_ink_draft(state)
                     state.edit_field = None
+                elif action == "ink_done":
+                    if state.edit_field == "ink" and state.reset_at is None:
+                        entries = ink_entries(state)
+                        try:
+                            tx.update_fields({"ink": sum(entries)})
+                        except MoneyError as error:
+                            state.notice = "❌ " + str(error)
+                        else:
+                            clear_ink_draft(state)
+                elif action == "ink_cancel":
+                    clear_ink_draft(state)
                 elif action == "report":
                     if state.reset_at is None:
                         outcome = Outcome(report_text=report(tx.cash(), self.hide_zero_balances))
                         tx.save_report(day, outcome.report_text, calculate(tx.cash())["net_income"])
                 elif action == "reset":
-                    state.edit_field = None
+                    clear_ink_draft(state)
                     state.reset_at = now
                 elif action == "reset_cancel":
-                    state.edit_field = None
+                    clear_ink_draft(state)
                     state.reset_at = None
                 elif action == "reset_confirm":
                     if state.reset_at is not None:
@@ -91,7 +121,7 @@ class CashService:
                             state.notice = "✅ Нова каса: суму «На карті» перенесено в «Отримав» (Старт). Решту полів очищено."
                             state.current_group = None
                         state.reset_at = None
-                        state.edit_field = None
+                        clear_ink_draft(state)
                 else:
                     state.notice = "Невідома кнопка. Натисни /start."
             else:
@@ -99,14 +129,14 @@ class CashService:
                 command = text.split(maxsplit=1)[0].split("@")[0].lower() if text else ""
                 if text in {"📚 Історія звітів", "Історія звітів"}:
                     state.current_group = "history:0"
-                    state.edit_field = None
+                    clear_ink_draft(state)
                     state.reset_at = None
                 elif text == "💰 Каса":
                     state.current_group = None
-                    state.edit_field = None
+                    clear_ink_draft(state)
                     state.reset_at = None
                 elif command in {"/start", "/cancel", "/help"}:
-                    state.edit_field = None
+                    clear_ink_draft(state)
                     state.reset_at = None
                     if command == "/start":
                         state.current_group = None
@@ -121,11 +151,18 @@ class CashService:
                 else:
                     try:
                         value = parse_money(text)
-                        tx.update_fields({state.edit_field: value})
+                        if state.edit_field == "ink":
+                            entries = ink_entries(state) + [value]
+                            # Check the final value now, before accepting the item into the draft.
+                            calculate({**tx.cash(), "ink": sum(entries)})
+                            state.ink_entries = json.dumps(entries)
+                        else:
+                            tx.update_fields({state.edit_field: value})
                     except MoneyError as error:
                         state.notice = "❌ " + str(error)
                     else:
-                        state.edit_field = None
+                        if state.edit_field != "ink":
+                            state.edit_field = None
                         outcome = Outcome(delete_input=True)
             tx.save(state)
             tx.mark(update_id)

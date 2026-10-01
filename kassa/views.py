@@ -1,6 +1,7 @@
 """Ukrainian dashboard, editable fields and plain-text reports."""
 
 from html import escape
+import json
 from .cash import FIELDS, INCOME_SOURCES, calculate, fields_in, format_money
 from .storage import State
 
@@ -70,7 +71,18 @@ def dashboard(data: dict[str, int], state: State, monthly_income: int = 0) -> st
         text += "\n⚠️ Почати нову касу? Сума «На карті» перейде в «Отримав» (Старт), решта полів очиститься. Підтвердження діє 2 хвилини."
     elif state.edit_field:
         text += "\n✏️ Редагування: " + escape(FIELDS[state.edit_field].label)
-        text += "\nНадішли нове значення. /cancel — скасувати."
+        if state.edit_field == "ink":
+            try:
+                entries = json.loads(state.ink_entries or "[]")
+            except json.JSONDecodeError:
+                entries = []
+            entries = entries if isinstance(entries, list) and all(type(value) is int for value in entries) else []
+            values = ", ".join(format_money(value, True) for value in entries) or "ще немає"
+            text += f"\nДодані суми: <b>{values}</b>"
+            text += f"\nРазом: <b>{format_money(sum(entries), True)}</b>"
+            text += "\nНадішли наступну суму або натисни «✅ Готово»."
+        else:
+            text += "\nНадішли нове значення. /cancel — скасувати."
     if state.notice:
         text += "\n" + escape(state.notice)
     return text
@@ -79,6 +91,8 @@ def dashboard(data: dict[str, int], state: State, monthly_income: int = 0) -> st
 def keyboard(data: dict[str, int], state: State) -> list[list[tuple[str, str]]]:
     if state.reset_at is not None:
         return [[("✅ Очистити", "reset_confirm"), ("❌ Скасувати", "reset_cancel")]]
+    if state.edit_field == "ink":
+        return [[("✅ Готово", "ink_done"), ("❌ Скасувати", "ink_cancel")]]
     if state.current_group:
         names = fields_in(state.current_group)
         rows = [[(f"{FIELDS[name].label} · {format_money(data[name], True)}", "edit:" + name)

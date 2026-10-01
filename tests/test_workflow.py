@@ -46,9 +46,13 @@ class WorkflowTests(unittest.TestCase):
         for index, name in enumerate(FIELDS):
             self.event(action="edit:" + name)
             self.assertTrue(self.event(text=str(index)).delete_input)
+            if name == "ink":
+                self.event(action="ink_done")
             self.assertEqual(self.cash()[name], index * 100)
             self.event(action="edit:" + name)
             self.event(text="1.01")
+            if name == "ink":
+                self.event(action="ink_done")
             self.assertEqual(self.cash()[name], 101)
         self.assertIsNone(self.state().edit_field)
 
@@ -76,6 +80,7 @@ class WorkflowTests(unittest.TestCase):
         self.event(action="edit:ink")
         restarted = CashService(Store(self.path), frozenset({OWNER}))
         restarted.process(OWNER, 99, text="-1.50")
+        restarted.process(OWNER, 100, action="ink_done", message_id=100)
         self.assertEqual(self.cash()["received"], 10000)
         self.assertEqual(self.cash()["ink"], -150)
         self.assertEqual(self.state().main_message_id, 100)
@@ -149,6 +154,31 @@ class WorkflowTests(unittest.TestCase):
         self.event(text="/start@kassa_bot")
         self.assertIsNone(self.state().notice)
 
+    def test_collection_accepts_several_amounts_and_writes_only_on_done(self):
+        self.event(action="edit:ink")
+        self.event(text="100")
+        self.event(text="25,50")
+        self.assertEqual(self.cash()["ink"], 0)
+        state = self.state()
+        self.assertEqual(state.edit_field, "ink")
+        view = dashboard(self.cash(), state)
+        self.assertIn("100, 25,50", view)
+        self.assertIn("Разом: <b>125,50</b>", view)
+        actions = [action for row in keyboard(self.cash(), state) for _, action in row]
+        self.assertEqual(actions, ["ink_done", "ink_cancel"])
+        self.event(action="ink_done")
+        self.assertEqual(self.cash()["ink"], 12550)
+        self.assertIsNone(self.state().edit_field)
+
+    def test_collection_cancel_keeps_previous_ink_value(self):
+        with self.store.transaction() as tx:
+            tx.update_fields({"ink": 1000})
+        self.event(action="edit:ink")
+        self.event(text="20")
+        self.event(action="ink_cancel")
+        self.assertEqual(self.cash()["ink"], 1000)
+        self.assertIsNone(self.state().edit_field)
+
     def test_report_and_dashboard_match_fixture(self):
         with self.store.transaction() as tx:
             data = tx.update_fields(FIXTURE)
@@ -221,6 +251,8 @@ class WorkflowTests(unittest.TestCase):
         for name, cents in FIXTURE.items():
             self.event(action="edit:" + name)
             self.event(text=str(cents // 100))
+            if name == "ink":
+                self.event(action="ink_done")
         self.assertIn("На карті  15831", self.event(action="report").report_text)
 
     def test_duplicate_receipts_keep_new_arrivals_if_telegram_resets_ids(self):
